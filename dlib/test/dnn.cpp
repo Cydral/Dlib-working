@@ -607,7 +607,7 @@ namespace
         tt::tensor_rand rnd(0);
         rnd.fill_uniform(x);
         resizable_tensor means_cpu(x.num_samples()), invstds_cpu(x.num_samples());
-        resizable_tensor gamma(1, x.k(), x.nr(), x.nc()), beta(1, x.k(), x.nr(), x.nc());
+        resizable_tensor gamma(1, x.k(), 1, 1), beta(1, x.k(), 1, 1);
         gamma = 1;
         beta = 0;
         const float eps = 1e-5;
@@ -631,7 +631,7 @@ namespace
             DLIB_TEST(::std::abs(rs.stddev() - 1.0f) < 0.01);
         }
         // check that the CPU and the CUDA implementation are equivalent
-#if DLIB_USE_CUDA
+#ifdef DLIB_USE_CUDA
         resizable_tensor y_cuda(x);
         resizable_tensor means_cuda(x.num_samples()), invstds_cuda(x.num_samples());
         cuda::layer_normalize(eps, y_cuda, means_cuda, invstds_cuda, x, gamma, beta);
@@ -639,16 +639,143 @@ namespace
         DLIB_TEST(max(abs(mat(means_cpu) - mat(means_cuda))) < 1e-5);
         DLIB_TEST(max(abs(mat(invstds_cpu) - mat(invstds_cuda))) < 1e-5);
         resizable_tensor gradient_input(x);
-        resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), x.nr(), x.nc()), beta_grad_cpu(1, x.k(), x.nr(), x.nc());
-        resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), x.nr(), x.nc()), beta_grad_cuda(1, x.k(), x.nr(), x.nc());
+        resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), 1, 1), beta_grad_cpu(1, x.k(), 1, 1);
+        resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), 1, 1), beta_grad_cuda(1, x.k(), 1, 1);
+        resizable_tensor dmeans_cpu, dvars_cpu, dmeans_cuda, dvars_cuda;
         rnd.fill_gaussian(gradient_input);
         src_grad_cpu = 0;
         src_grad_cuda = 0;
-        cpu::layer_normalize_gradient(eps, gradient_input, means_cpu, invstds_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, beta_grad_cpu);
-        cuda::layer_normalize_gradient(eps, gradient_input, means_cuda, invstds_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, beta_grad_cuda);
+        cpu::layer_normalize_gradient(eps, gradient_input, means_cpu, invstds_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, beta_grad_cpu, dmeans_cpu, dvars_cpu);
+        cuda::layer_normalize_gradient(eps, gradient_input, means_cuda, invstds_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, beta_grad_cuda, dmeans_cuda, dvars_cuda);
         DLIB_TEST(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5);
         DLIB_TEST(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5);
         DLIB_TEST(max(abs(mat(beta_grad_cpu) - mat(beta_grad_cuda))) < 1e-5);
+        DLIB_TEST(max(abs(mat(dmeans_cpu) - mat(dmeans_cuda))) < 1e-4);
+        DLIB_TEST(max(abs(mat(dvars_cpu) - mat(dvars_cuda))) < 1e-4);
+#endif
+    }
+
+// ----------------------------------------------------------------------------------------
+
+    void test_rms_normalize()
+    {
+        resizable_tensor x(2, 3, 4, 5);
+        resizable_tensor y_cpu(x);
+        tt::tensor_rand rnd(0);
+        rnd.fill_uniform(x);
+        resizable_tensor scale_cpu;
+        resizable_tensor gamma(1, x.k());
+        gamma = 1;
+        const float eps = 1e-5;
+        cpu::rms_normalize(eps, y_cpu, scale_cpu, x, gamma);
+
+        // check that the output is correctly normalized
+        const float* p_x = x.host();
+        const float* p_y = y_cpu.host();
+        const float* p_scale = scale_cpu.host();
+        bool error_found = false;
+        for (long n = 0; n < x.num_samples(); ++n)
+        {
+            for (long k = 0; k < x.k(); ++k)
+            {
+                for (long r = 0; r < x.nr(); ++r)
+                {
+                    for (long c = 0; c < x.nc(); ++c)
+                    {
+                        float x_val = p_x[tensor_index(x, n, k, r, c)];
+                        float y_val = p_y[tensor_index(y_cpu, n, k, r, c)];
+                        float rms_val = p_scale[n];
+                        if (std::abs(y_val - x_val * rms_val) >= 1e-5) error_found = true;
+                    }
+                }
+            }
+        }
+        DLIB_TEST(!error_found);
+
+        // check the backward pass
+        resizable_tensor gradient_input(x);
+        resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k());
+        resizable_tensor dscale_cpu(x.num_samples());
+        rnd.fill_gaussian(gradient_input);
+        src_grad_cpu = 0;
+        cpu::rms_normalize_gradient(gradient_input, scale_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, dscale_cpu);
+
+        const float* p_gradient_input = gradient_input.host();
+        const float* p_src = x.host();
+        const float* p_src_grad_cpu = src_grad_cpu.host();
+        const float* p_gamma = gamma.host();
+        const float* p_scale_cpu = scale_cpu.host();
+        const float* p_dscale_cpu = dscale_cpu.host();
+
+        bool backward_error_found = false;
+        for (long n = 0; n < x.num_samples(); ++n)
+        {
+            const float scale_pow = -0.5 * std::pow(p_scale_cpu[n], 3.0f);
+            for (long k = 0; k < x.k(); ++k)
+            {
+                for (long r = 0; r < x.nr(); ++r)
+                {
+                    for (long c = 0; c < x.nc(); ++c)
+                    {
+                        float gradient_input_val = p_gradient_input[tensor_index(gradient_input, n, k, r, c)];
+                        float src_val = p_src[tensor_index(x, n, k, r, c)];
+                        float rms_val = p_scale_cpu[n];
+                        float expected_src_grad = gradient_input_val * p_gamma[k] * rms_val + p_dscale_cpu[n] * 2 * src_val * 1.0f / (x.k() * x.nr() * x.nc());
+                        float src_grad_val = p_src_grad_cpu[tensor_index(src_grad_cpu, n, k, r, c)];
+                        if (std::abs(src_grad_val - expected_src_grad) >= 1e-4)
+                            backward_error_found = true;
+                    }
+                }
+            }
+        }
+        DLIB_TEST(!backward_error_found);        
+
+        // check that the CPU and the CUDA implementation are equivalent 
+#ifdef DLIB_USE_CUDA 
+        resizable_tensor y_cuda(x);
+        resizable_tensor scale_cuda;
+        cuda::rms_normalize(eps, y_cuda, scale_cuda, x, gamma);
+        DLIB_TEST(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5);
+        DLIB_TEST(max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5);
+
+        resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k());
+        resizable_tensor dscale_cuda(x.num_samples());
+        src_grad_cuda = 0;
+        cuda::rms_normalize_gradient(gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, dscale_cuda);
+        DLIB_TEST(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5);
+        DLIB_TEST(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5);
+        DLIB_TEST(max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5);
+#endif        
+    }
+
+// ----------------------------------------------------------------------------------------
+
+    void test_transpose()
+    {
+        const long num_samples = 2;
+        const long k = 3;
+        const long nr = 4;
+        const long nc = 5;
+
+        resizable_tensor input(num_samples, k, nr, nc);
+        resizable_tensor output_cpu_a(num_samples, k, nc, nr);    
+        tt::tensor_rand rnd(0);
+        rnd.fill_uniform(input);
+        resizable_tensor output_cpu_b(input);
+
+        cpu::transpose(false, output_cpu_a, input);
+        cpu::transpose(true, output_cpu_b, output_cpu_a);
+        input *= 2;
+        DLIB_TEST(max(abs(mat(output_cpu_b) - mat(input))) < 1e-5);
+
+#ifdef DLIB_USE_CUDA
+        input /= 2;
+        resizable_tensor output_cuda_a, output_cuda_b(input);    
+        output_cuda_a.copy_size(output_cpu_a);
+        cuda::transpose(false, output_cuda_a, input);
+        cuda::transpose(true, output_cuda_b, output_cuda_a);
+        DLIB_TEST(max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5);
+        DLIB_TEST(max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5);
 #endif
     }
 
@@ -2010,6 +2137,12 @@ namespace
             auto res = test_layer(l);
             DLIB_TEST_MSG(res, res);
         }
+        {  
+            print_spinner();  
+            rms_norm_ l;  
+            auto res = test_layer(l);  
+            DLIB_TEST_MSG(res, res);  
+        }         
         {
             print_spinner();
             cont_<3,3,3,2,2,0,0> l;
@@ -2178,6 +2311,12 @@ namespace
             auto res = test_layer(l);
             DLIB_TEST_MSG(res, res);
         }
+        {
+            print_spinner();
+            transpose_ l;
+            auto res = test_layer(l);
+            DLIB_TEST_MSG(res, res);
+        }        
     }
 
 // ----------------------------------------------------------------------------------------
@@ -4267,11 +4406,11 @@ namespace
         resizable_tensor grad_cpu(x), grad_cuda(x);
         tt::tensor_rand rnd;
         rnd.fill_gaussian(x);
-        cpu::reorg(out_cpu, 2, 2, x);
-        cuda::reorg(out_cuda, 2, 2, x);
+        cpu::reorg(false, out_cpu, 2, 2, x);
+        cuda::reorg(false, out_cuda, 2, 2, x);
         DLIB_TEST(max(squared(mat(out_cuda) - mat(out_cpu))) == 0);
-        cpu::reorg_gradient(grad_cpu, 2, 2, out_cpu);
-        cuda::reorg_gradient(grad_cuda, 2, 2, out_cuda);
+        cpu::reorg_gradient(false, grad_cpu, 2, 2, out_cpu);
+        cuda::reorg_gradient(false, grad_cuda, 2, 2, out_cuda);
         DLIB_TEST(max(squared(mat(out_cuda) - mat(out_cpu))) == 0);
 #endif
     }
@@ -4386,6 +4525,8 @@ namespace
             test_batch_normalize();
             test_batch_normalize_conv();
             test_layer_normalize();
+            test_rms_normalize();
+            test_transpose();
             test_basic_tensor_ops();
             test_layers();
             test_visit_functions();

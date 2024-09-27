@@ -684,13 +684,49 @@ namespace dlib { namespace tt
             const tensor& gamma,
             tensor& src_grad,
             tensor& gamma_grad,
-            tensor& beta_grad
+            tensor& beta_grad,
+            resizable_tensor& dmeans,
+            resizable_tensor& dvars
     )
     {
 #ifdef DLIB_USE_CUDA
-        cuda::layer_normalize_gradient(eps, gradient_input, means, invstds, src, gamma, src_grad, gamma_grad, beta_grad);
+        cuda::layer_normalize_gradient(eps, gradient_input, means, invstds, src, gamma, src_grad, gamma_grad, beta_grad, dmeans, dvars);
 #else
-        cpu::layer_normalize_gradient(eps, gradient_input, means, invstds, src, gamma, src_grad, gamma_grad, beta_grad);
+        cpu::layer_normalize_gradient(eps, gradient_input, means, invstds, src, gamma, src_grad, gamma_grad, beta_grad, dmeans, dvars);
+#endif
+    }
+
+// ----------------------------------------------------------------------------------------
+
+    void rms_normalize(
+        const double eps,
+        resizable_tensor& dest,
+        resizable_tensor& scale,
+        const tensor& src,
+        const tensor& gamma
+    )
+    {            
+#ifdef DLIB_USE_CUDA
+        cuda::rms_normalize(eps, dest, scale, src, gamma);
+#else
+        cpu::rms_normalize(eps, dest, scale, src, gamma);
+#endif
+    }
+
+    void rms_normalize_gradient(
+        const tensor& gradient_input,
+        const tensor& scale,
+        const tensor& src,
+        const tensor& gamma,
+        tensor& src_grad,
+        tensor& gamma_grad,
+        resizable_tensor& dscale
+    )
+    {            
+#ifdef DLIB_USE_CUDA
+        cuda::rms_normalize_gradient(gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
+#else
+        cpu::rms_normalize_gradient(gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
 #endif
     }
 
@@ -1183,6 +1219,7 @@ namespace dlib { namespace tt
 // ------------------------------------------------------------------------------------
 
     void reorg (
+        bool add_to,
         tensor& dest,
         const int row_stride,
         const int col_stride,
@@ -1190,13 +1227,14 @@ namespace dlib { namespace tt
     )
     {
 #ifdef DLIB_USE_CUDA
-        cuda::reorg(dest, row_stride, col_stride, src);
+        cuda::reorg(add_to, dest, row_stride, col_stride, src);
 #else
-        cpu::reorg(dest, row_stride, col_stride, src);
+        cpu::reorg(add_to, dest, row_stride, col_stride, src);
 #endif
     }
 
     void reorg_gradient (
+        bool add_to,
         tensor& grad,
         const int row_stride,
         const int col_stride,
@@ -1204,9 +1242,9 @@ namespace dlib { namespace tt
     )
     {
 #ifdef DLIB_USE_CUDA
-        cuda::reorg_gradient(grad, row_stride, col_stride, gradient_input);
+        cuda::reorg_gradient(add_to, grad, row_stride, col_stride, gradient_input);
 #else
-        cpu::reorg_gradient(grad, row_stride, col_stride, gradient_input);
+        cpu::reorg_gradient(add_to, grad, row_stride, col_stride, gradient_input);
 #endif
     }
 
@@ -1240,6 +1278,21 @@ namespace dlib { namespace tt
         finv(m,out);
 #else
         out = dlib::inv(mat(m));
+#endif
+    }
+
+// ----------------------------------------------------------------------------------------
+
+    void transpose(
+        bool add_to,
+        tensor& dest,
+        const tensor& src
+    )
+    {
+#ifdef DLIB_USE_CUDA
+        cuda::transpose(add_to, dest, src);
+#else
+        cpu::transpose(add_to, dest, src);
 #endif
     }
 
